@@ -43,6 +43,45 @@ pub enum funnel_sync {
     FUNNEL_SYNC_EXPLICIT = 1,
     FUNNEL_SYNC_BOTH = 2,
 }
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VkImage_T {
+    _unused: [u8; 0],
+}
+pub type VkImage = *mut VkImage_T;
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VkInstance_T {
+    _unused: [u8; 0],
+}
+pub type VkInstance = *mut VkInstance_T;
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VkPhysicalDevice_T {
+    _unused: [u8; 0],
+}
+pub type VkPhysicalDevice = *mut VkPhysicalDevice_T;
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VkDevice_T {
+    _unused: [u8; 0],
+}
+pub type VkDevice = *mut VkDevice_T;
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VkSemaphore_T {
+    _unused: [u8; 0],
+}
+pub type VkSemaphore = *mut VkSemaphore_T;
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VkFence_T {
+    _unused: [u8; 0],
+}
+pub type VkFence = *mut VkFence_T;
+pub type VkFormat = ::std::os::raw::c_uint;
+pub type VkFormatFeatureFlagBits = ::std::os::raw::c_uint;
+pub type VkImageUsageFlagBits = ::std::os::raw::c_uint;
 unsafe extern "C" {
     pub static FUNNEL_RATE_VARIABLE: funnel_fraction;
     pub fn funnel_init(pctx: *mut *mut funnel_ctx) -> ::std::os::raw::c_int;
@@ -108,4 +147,38 @@ unsafe extern "C" {
     pub fn funnel_buffer_get_user_data(buf: *mut funnel_buffer) -> *mut ::std::os::raw::c_void;
     pub fn funnel_buffer_has_sync(buf: *mut funnel_buffer) -> bool;
     pub fn funnel_buffer_is_efficient_for_rendering(buf: *mut funnel_buffer) -> bool;
+    pub fn funnel_stream_init_vulkan(
+        stream: *mut funnel_stream,
+        instance: VkInstance,
+        physical_device: VkPhysicalDevice,
+        device: VkDevice,
+    ) -> ::std::os::raw::c_int;
+    pub fn funnel_stream_vk_set_usage(
+        stream: *mut funnel_stream,
+        usage: VkImageUsageFlagBits,
+    ) -> ::std::os::raw::c_int;
+    pub fn funnel_stream_vk_add_format(
+        stream: *mut funnel_stream,
+        format: VkFormat,
+        alpha: bool,
+        features: VkFormatFeatureFlagBits,
+    ) -> ::std::os::raw::c_int;
+    pub fn funnel_buffer_get_vk_image(
+        buf: *mut funnel_buffer,
+        pimage: *mut VkImage,
+    ) -> ::std::os::raw::c_int;
+    pub fn funnel_buffer_get_vk_format(
+        buf: *mut funnel_buffer,
+        pformat: *mut VkFormat,
+        phas_alpha: *mut bool,
+    ) -> ::std::os::raw::c_int;
+    pub fn funnel_buffer_get_vk_semaphores(
+        buf: *mut funnel_buffer,
+        pacquire: *mut VkSemaphore,
+        prelease: *mut VkSemaphore,
+    ) -> ::std::os::raw::c_int;
+    pub fn funnel_buffer_get_vk_fence(
+        buf: *mut funnel_buffer,
+        pfence: *mut VkFence,
+    ) -> ::std::os::raw::c_int;
 }

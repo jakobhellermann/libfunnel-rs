@@ -7,4 +7,5 @@ src/generated/libfunnel.rs: include/wrapper.h /usr/include/funnel/funnel.h /usr/
 		--no-layout-tests \
 		--merge-extern-blocks \
 		--rustified-enum 'funnel_.*' \
+		| awk '/^pub const Vk.*_VK_/ {skip=1} skip && /;$$/ {skip=0; next} !skip' \
 		| sponge src/bindings.rs
