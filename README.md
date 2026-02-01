@@ -15,7 +15,7 @@ Rust bindings for [libfunnel](https://github.com/hoshinolina/libfunnel) - a libr
 
 See [libfunnel Documentation](https://libfunnel.readthedocs.io/en/latest/) for the upstream docs. The documentation for the bindings are available on [docs.rs](https://docs.rs/libfunnel).
 
-Speicifally the [`funnel_mode`](https://libfunnel.readthedocs.io/en/latest/funnel_8h.html#a302307074c18579ebd57b9088f76c4c7) and [Buffer synchronization guide](https://libfunnel.readthedocs.io/en/latest/buffersync.html) pages are very helpful to read.
+Specifically the [`funnel_mode`](https://libfunnel.readthedocs.io/en/latest/funnel_8h.html#a302307074c18579ebd57b9088f76c4c7) and [Buffer synchronization guide](https://libfunnel.readthedocs.io/en/latest/buffersync.html) pages are very helpful to read.
 
 ## Installation
 
