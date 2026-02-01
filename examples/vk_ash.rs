@@ -8,11 +8,11 @@
 //   -synchronous   Synchronous mode with MAILBOX present
 //   -sync_torture  Run 100 iterations at 1024x1024 for testing
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, ensure};
 use ash::ext::debug_utils;
 use ash::khr::{surface, swapchain, wayland_surface};
 use ash::vk::{self, Handle, PresentModeKHR};
-use libfunnel::bindings::{self as funnel, funnel_mode};
+use libfunnel::{FunnelBuffer, FunnelContext, FunnelStream, funnel_fraction, funnel_mode};
 use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
@@ -89,35 +89,6 @@ struct SwapchainResources {
 #[repr(C)]
 struct PushConstants {
     frame: f32,
-}
-
-// Funnel buffer callbacks
-unsafe extern "C" fn alloc_buffer_cb(
-    _opaque: *mut std::os::raw::c_void,
-    _stream: *mut funnel::funnel_stream,
-    _buf: *mut funnel::funnel_buffer,
-) {
-    // TODO: Allocate VkImageView for funnel buffer (C lines 231-266)
-    // Currently commented out in C code, so we leave empty for now
-}
-
-unsafe extern "C" fn free_buffer_cb(
-    _opaque: *mut std::os::raw::c_void,
-    _stream: *mut funnel::funnel_stream,
-    buf: *mut funnel::funnel_buffer,
-) {
-    // Get user data and destroy the image view if it exists (C lines 268-272)
-    // Note: This would need a global device handle to call device.destroy_image_view()
-    // like the C code uses. Since alloc_buffer_cb is commented out in C and never
-    // creates views, this callback won't have anything to destroy in practice.
-    unsafe {
-        let view_ptr = funnel::funnel_buffer_get_user_data(buf);
-        let view = vk::ImageView::from_raw(view_ptr as u64);
-        if !view.is_null() {
-            // Would call: device.destroy_image_view(view, None);
-            // But we don't have device handle here without using globals
-        }
-    }
 }
 
 // Wayland application state
@@ -920,7 +891,8 @@ fn main() -> Result<()> {
 
     println!("Swapchain created with {} images", swapchain.image_count);
 
-    let (ctx, stream) = setup_funnel(&config, &instance, phys_device, &device);
+    let ctx = FunnelContext::new().context("Failed to init funnel context")?;
+    let mut stream = setup_funnel(&ctx, &config, &instance, phys_device, &device)?;
 
     println!("Funnel stream initialized and started");
 
@@ -940,7 +912,7 @@ fn main() -> Result<()> {
         vertex_shader_module,
         fragment_shader_module,
         &mut swapchain,
-        stream,
+        &mut stream,
     )?;
 
     println!("Exiting main loop");
@@ -949,13 +921,9 @@ fn main() -> Result<()> {
     unsafe { device.device_wait_idle()? };
 
     // Funnel cleanup (C lines 1137-1142)
-    unsafe {
-        let ret = funnel::funnel_stream_stop(stream);
-        assert_eq!(ret, 0, "funnel_stream_stop failed");
-
-        funnel::funnel_stream_destroy(stream);
-        funnel::funnel_shutdown(ctx);
-    }
+    stream.stop().context("stop stream")?;
+    stream.destroy();
+    ctx.shutdown();
 
     println!("Funnel stream stopped and cleaned up");
 
@@ -1014,7 +982,7 @@ fn render_loop(
     vertex_shader_module: vk::ShaderModule,
     fragment_shader_module: vk::ShaderModule,
     swapchain: &mut SwapchainResources,
-    stream: *mut funnel::funnel_stream,
+    stream: &mut FunnelStream,
 ) -> Result<(), anyhow::Error> {
     let mut frame = 0u32;
     let mut current_frame = 0u32;
@@ -1052,12 +1020,10 @@ fn render_loop(
                 surface.commit();
 
                 // Update funnel stream size (C lines 920-923)
-                unsafe {
-                    let ret = funnel::funnel_stream_set_size(stream, config.width, config.height);
-                    assert_eq!(ret, 0);
-                    let ret = funnel::funnel_stream_configure(stream);
-                    assert_eq!(ret, 0);
-                };
+                stream.set_size(config.width, config.height)?;
+                stream
+                    .configure()
+                    .context("configure stream after resize")?;
             }
 
             state.ready_to_resize.store(false, Ordering::Relaxed);
@@ -1065,9 +1031,7 @@ fn render_loop(
         }
 
         // Dequeue a funnel buffer for this frame (C line 928)
-        let mut funnel_buf: *mut funnel::funnel_buffer = std::ptr::null_mut();
-        let _ret = unsafe { funnel::funnel_stream_dequeue(stream, &mut funnel_buf) };
-        // _ret == 0 means we got a buffer, non-zero means no buffer available (skip frame)
+        let mut funnel_buffer = stream.dequeue().context("dequeue")?;
 
         // Copy values from current_element to avoid long-lived borrow
         let (current_fence, current_start_semaphore, current_end_semaphore) = {
@@ -1194,18 +1158,11 @@ fn render_loop(
         }
 
         // Blit to funnel buffer if we have one (C lines 989-1037)
-        if !funnel_buf.is_null() {
+        if let Some(buf) = &mut funnel_buffer {
             unsafe {
-                let mut buffer_width: u32 = 0;
-                let mut buffer_height: u32 = 0;
-                funnel::funnel_buffer_get_size(funnel_buf, &mut buffer_width, &mut buffer_height);
-
-                let mut funnel_image: funnel::VkImage = std::ptr::null_mut();
-                let ret = funnel::funnel_buffer_get_vk_image(funnel_buf, &mut funnel_image);
-                assert_eq!(ret, 0, "funnel_buffer_get_vk_image failed");
-                assert!(!funnel_image.is_null(), "funnel image is null");
-
-                let funnel_vk_image = vk::Image::from_raw(funnel_image as u64);
+                let (buffer_width, buffer_height) = buf.get_size();
+                let funnel_vk_image = buf.vk_get_image().context("get vk image")?;
+                let funnel_vk_image = vk::Image::from_raw(funnel_vk_image as u64);
 
                 let blit_region = vk::ImageBlit {
                     src_subresource: vk::ImageSubresourceLayers {
@@ -1305,40 +1262,32 @@ fn render_loop(
 
         // Queue submit (C lines 1065-1092)
         // Get funnel semaphores and fence if we have a buffer (C lines 1074-1080)
-        let (wait_semaphores, signal_semaphores, submit_fence) = if !funnel_buf.is_null() {
-            unsafe {
-                let mut funnel_wait_sema: funnel::VkSemaphore = std::ptr::null_mut();
-                let mut funnel_signal_sema: funnel::VkSemaphore = std::ptr::null_mut();
-                let ret = funnel::funnel_buffer_get_vk_semaphores(
-                    funnel_buf,
-                    &mut funnel_wait_sema,
-                    &mut funnel_signal_sema,
-                );
-                assert_eq!(ret, 0, "funnel_buffer_get_vk_semaphores failed");
+        let (wait_semaphores, signal_semaphores, submit_fence) =
+            if let Some(buf) = &mut funnel_buffer {
+                unsafe {
+                    let (funnel_wait_sema, funnel_signal_sema) =
+                        buf.vk_get_semaphores().context("get vk fence")?;
+                    let funnel_fence = buf.vk_get_fence()?;
 
-                let mut funnel_fence: funnel::VkFence = std::ptr::null_mut();
-                let ret = funnel::funnel_buffer_get_vk_fence(funnel_buf, &mut funnel_fence);
-                assert_eq!(ret, 0, "funnel_buffer_get_vk_fence failed");
-
+                    (
+                        vec![
+                            current_start_semaphore,
+                            vk::Semaphore::from_raw(funnel_wait_sema as u64),
+                        ],
+                        vec![
+                            current_end_semaphore,
+                            vk::Semaphore::from_raw(funnel_signal_sema as u64),
+                        ],
+                        vk::Fence::from_raw(funnel_fence as u64),
+                    )
+                }
+            } else {
                 (
-                    vec![
-                        current_start_semaphore,
-                        vk::Semaphore::from_raw(funnel_wait_sema as u64),
-                    ],
-                    vec![
-                        current_end_semaphore,
-                        vk::Semaphore::from_raw(funnel_signal_sema as u64),
-                    ],
-                    vk::Fence::from_raw(funnel_fence as u64),
+                    vec![current_start_semaphore],
+                    vec![current_end_semaphore],
+                    current_fence,
                 )
-            }
-        } else {
-            (
-                vec![current_start_semaphore],
-                vec![current_end_semaphore],
-                current_fence,
-            )
-        };
+            };
 
         let wait_stages = [
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -1357,12 +1306,9 @@ fn render_loop(
         }
 
         // Enqueue funnel buffer if we have one (C lines 1094-1102)
-        if !funnel_buf.is_null() {
-            let ret = unsafe { funnel::funnel_stream_enqueue(stream, funnel_buf) };
-            if ret < 0 {
-                eprintln!("Queue failed: {}", ret);
-                assert!(ret >= 0, "funnel_stream_enqueue failed");
-            } else if ret != 1 {
+        if let Some(buf) = funnel_buffer.take() {
+            let was_enqueued = unsafe { stream.enqueue(buf).context("enqueue")? };
+            if !was_enqueued {
                 eprintln!("Buffer dropped (stream renegotiated or paused)");
             }
         }
@@ -1417,100 +1363,89 @@ fn render_loop(
     Ok(())
 }
 
+struct BufferCallbacks;
+impl libfunnel::BufferCallbacks for BufferCallbacks {
+    type UserData = ();
+
+    fn on_alloc<'stream>(_: *mut (), _: &'stream FunnelStream, _: &mut FunnelBuffer<'stream>) {
+        // TODO: Allocate VkImageView for funnel buffer (C lines 231-266)
+        // Currently commented out in C code, so we leave empty for now
+    }
+
+    fn on_free<'stream>(_: *mut (), _: &'stream FunnelStream, buffer: &mut FunnelBuffer<'stream>) {
+        // Get user data and destroy the image view if it exists (C lines 268-272)
+        // Note: This would need a global device handle to call device.destroy_image_view()
+        // like the C code uses. Since alloc_buffer_cb is commented out in C and never
+        // creates views, this callback won't have anything to destroy in practice.
+        let view_ptr = buffer.get_user_data();
+        let view = vk::ImageView::from_raw(view_ptr as u64);
+        if !view.is_null() {
+            // Would call: device.destroy_image_view(view, None);
+            // But we don't have device handle here without using globals
+        }
+    }
+}
+
 fn setup_funnel(
+    ctx: &FunnelContext,
     config: &Config,
     instance: &ash::Instance,
     phys_device: vk::PhysicalDevice,
     device: &ash::Device,
-) -> (*mut funnel::funnel_ctx, *mut funnel::funnel_stream) {
-    // Funnel initialization (C lines 849-898)
-    let mut ctx: *mut funnel::funnel_ctx = std::ptr::null_mut();
-    let mut stream: *mut funnel::funnel_stream = std::ptr::null_mut();
-
+) -> Result<FunnelStream> {
+    let mut stream = ctx
+        .create_stream(c"Funnel Test")
+        .context("Failed to create stream")?;
     unsafe {
-        let ret = funnel::funnel_init(&mut ctx);
-        assert_eq!(ret, 0, "funnel_init failed");
+        stream.set_buffer_callbacks::<BufferCallbacks>(std::ptr::null_mut());
 
-        let stream_name = CString::new("Funnel Test").unwrap();
-        let ret = funnel::funnel_stream_create(ctx, stream_name.as_ptr(), &mut stream);
-        assert_eq!(ret, 0, "funnel_stream_create failed");
+        stream
+            .init_vulkan(
+                instance.handle().as_raw() as *mut _,
+                phys_device.as_raw() as *mut _,
+                device.handle().as_raw() as *mut _,
+            )
+            .context("Failed to init vulkan")?;
 
-        funnel::funnel_stream_set_buffer_callbacks(
-            stream,
-            Some(alloc_buffer_cb),
-            Some(free_buffer_cb),
-            std::ptr::null_mut(),
-        );
+        stream.set_size(config.width, config.height)?;
+        stream.set_mode(config.funnel_mode)?;
+        stream.set_rate(funnel_fraction::VARIABLE, 1.into(), 1000.into())?;
+        stream.vk_set_usage(vk::ImageUsageFlags::TRANSFER_DST.as_raw())?;
 
-        let ret = funnel::funnel_stream_init_vulkan(
-            stream,
-            instance.handle().as_raw() as funnel::VkInstance,
-            phys_device.as_raw() as funnel::VkPhysicalDevice,
-            device.handle().as_raw() as funnel::VkDevice,
-        );
-        assert_eq!(ret, 0, "funnel_stream_init_vulkan failed");
-
-        let ret = funnel::funnel_stream_set_size(stream, config.width, config.height);
-        assert_eq!(ret, 0, "funnel_stream_set_size failed");
-
-        let ret = funnel::funnel_stream_set_mode(stream, config.funnel_mode);
-        assert_eq!(ret, 0, "funnel_stream_set_mode failed");
-
-        // FUNNEL_RATE_VARIABLE = {0, 1} from funnel.h
-        let rate_variable = funnel::funnel_fraction { num: 0, den: 1 };
-        let ret = funnel::funnel_stream_set_rate(
-            stream,
-            rate_variable,
-            funnel::funnel_fraction { num: 1, den: 1 },
-            funnel::funnel_fraction { num: 1000, den: 1 },
-        );
-        assert_eq!(ret, 0, "funnel_stream_set_rate failed");
-
-        let ret =
-            funnel::funnel_stream_vk_set_usage(stream, vk::ImageUsageFlags::TRANSFER_DST.as_raw());
-        assert_eq!(ret, 0, "funnel_stream_vk_set_usage failed");
-
-        // Try multiple formats, at least one should work
         let mut have_format = false;
-        let ret = funnel::funnel_stream_vk_add_format(
-            stream,
+        let ret = stream.vk_add_format(
             vk::Format::R8G8B8A8_SRGB.as_raw() as u32,
             true,
             vk::FormatFeatureFlags::BLIT_DST.as_raw(),
         );
-        have_format |= ret == 0;
+        have_format |= ret.is_ok();
 
-        let ret = funnel::funnel_stream_vk_add_format(
-            stream,
+        let ret = stream.vk_add_format(
             vk::Format::B8G8R8A8_SRGB.as_raw() as u32,
             true,
             vk::FormatFeatureFlags::BLIT_DST.as_raw(),
         );
-        have_format |= ret == 0;
+        have_format |= ret.is_ok();
 
-        let ret = funnel::funnel_stream_vk_add_format(
-            stream,
+        let ret = stream.vk_add_format(
             vk::Format::R8G8B8A8_SRGB.as_raw() as u32,
             false,
             vk::FormatFeatureFlags::BLIT_DST.as_raw(),
         );
-        have_format |= ret == 0;
+        have_format |= ret.is_ok();
 
-        let ret = funnel::funnel_stream_vk_add_format(
-            stream,
+        let ret = stream.vk_add_format(
             vk::Format::B8G8R8A8_SRGB.as_raw() as u32,
             false,
             vk::FormatFeatureFlags::BLIT_DST.as_raw(),
         );
-        have_format |= ret == 0;
+        have_format |= ret.is_ok();
 
-        assert!(have_format, "No suitable format found for funnel stream");
+        ensure!(have_format, "No suitable format found for funnel stream");
 
-        let ret = funnel::funnel_stream_configure(stream);
-        assert_eq!(ret, 0, "funnel_stream_configure failed");
-
-        let ret = funnel::funnel_stream_start(stream);
-        assert_eq!(ret, 0, "funnel_stream_start failed");
+        stream.configure().context("configure stream")?;
+        stream.start().context("start stream")?;
     }
-    (ctx, stream)
+
+    Ok(stream)
 }
