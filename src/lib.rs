@@ -209,14 +209,68 @@ pub struct Fraction {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// An error returned by libfunnel operations.
-#[derive(Debug)]
-pub struct Error {
-    pub code: i32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    InvalidArgument,
+    Io,
+    ConnectionRefused,
+    NotSupported,
+    InProgress,
+    Busy,
+    Shutdown,
+    Exists,
+    NotFound,
+    NoDevice,
+    Other(i32),
 }
+
 impl std::error::Error for Error {}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "funnel error code {}", self.code)
+        match self {
+            Error::InvalidArgument => write!(f, "Invalid argument"),
+            Error::Io => write!(f, "I/O error or invalid PipeWire context"),
+            Error::ConnectionRefused => write!(f, "Failed to connect to PipeWire daemon"),
+            Error::NotSupported => write!(f, "Operation not supported"),
+            Error::InProgress => write!(f, "Operation in progress"),
+            Error::Busy => write!(f, "Resource busy"),
+            Error::Shutdown => write!(f, "Stream not started or shutting down"),
+            Error::Exists => write!(f, "Resource already exists"),
+            Error::NotFound => write!(f, "Resource not found"),
+            Error::NoDevice => write!(f, "Device not found"),
+            Error::Other(code) => write!(f, "Funnel error code {}", code),
+        }
+    }
+}
+
+const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const EBUSY: i32 = 16;
+const EEXIST: i32 = 17;
+const ENODEV: i32 = 19;
+const EINVAL: i32 = 22;
+const EOPNOTSUPP: i32 = 95;
+const ECONNREFUSED: i32 = 111;
+const ESHUTDOWN: i32 = 108;
+const EINPROGRESS: i32 = 115;
+
+impl Error {
+    /// Get the raw error code.
+    pub fn code(&self) -> i32 {
+        match self {
+            Error::InvalidArgument => -EINVAL,
+            Error::Io => -EIO,
+            Error::ConnectionRefused => -ECONNREFUSED,
+            Error::NotSupported => -EOPNOTSUPP,
+            Error::InProgress => -EINPROGRESS,
+            Error::Busy => -EBUSY,
+            Error::Shutdown => -ESHUTDOWN,
+            Error::Exists => -EEXIST,
+            Error::NotFound => -ENOENT,
+            Error::NoDevice => -ENODEV,
+            Error::Other(code) => *code,
+        }
     }
 }
 
@@ -224,7 +278,19 @@ fn check(code: i32) -> Result<(), Error> {
     if code >= 0 {
         Ok(())
     } else {
-        Err(Error { code })
+        Err(match -code {
+            EINVAL => Error::InvalidArgument,
+            EIO => Error::Io,
+            ECONNREFUSED => Error::ConnectionRefused,
+            EOPNOTSUPP => Error::NotSupported,
+            EINPROGRESS => Error::InProgress,
+            EBUSY => Error::Busy,
+            ESHUTDOWN => Error::Shutdown,
+            EEXIST => Error::Exists,
+            ENOENT => Error::NotFound,
+            ENODEV => Error::NoDevice,
+            _ => Error::Other(code),
+        })
     }
 }
 
@@ -241,7 +307,7 @@ impl FunnelContext {
     ///
     /// # Errors
     ///
-    /// * `-ECONNREFUSED` - Failed to connect to PipeWire daemon
+    /// * [`Error::ConnectionRefused`] - Failed to connect to PipeWire daemon
     pub fn new() -> Result<FunnelContext> {
         let mut ctx = std::ptr::null_mut();
         check(unsafe { bindings::funnel_init(&mut ctx) })?;
@@ -259,7 +325,7 @@ impl FunnelContext {
     ///
     /// # Errors
     ///
-    /// * `-EIO` - The PipeWire context is invalid (fatal error)
+    /// * [`Error::Io`] - The PipeWire context is invalid (fatal error)
     pub fn create_stream(&self, name: &CStr) -> Result<FunnelStream> {
         let mut stream = std::ptr::null_mut();
         unsafe {
@@ -293,7 +359,7 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - Invalid argument
+    /// * [`Error::InvalidArgument`] - Invalid argument
     pub fn set_size(&mut self, width: u32, height: u32) -> Result<()> {
         unsafe { check(bindings::funnel_stream_set_size(self.stream, width, height)) }
     }
@@ -302,7 +368,7 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - Invalid argument
+    /// * [`Error::InvalidArgument`] - Invalid argument
     pub fn set_mode(&mut self, mode: FunnelMode) -> Result<()> {
         unsafe { check(bindings::funnel_stream_set_mode(self.stream, mode.into())) }
     }
@@ -313,8 +379,8 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - The selected sync combination is invalid for this API
-    /// * `-EOPNOTSUPP` - The API/driver does not support this sync mode
+    /// * [`Error::InvalidArgument`] - The selected sync combination is invalid for this API
+    /// * [`Error::NotSupported`] - The API/driver does not support this sync mode
     pub fn set_sync(&mut self, frontend: FunnelSync, backend: FunnelSync) -> Result<()> {
         unsafe {
             check(bindings::funnel_stream_set_sync(
@@ -335,7 +401,7 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - Invalid argument
+    /// * [`Error::InvalidArgument`] - Invalid argument
     pub fn set_rate(&mut self, default: Fraction, min: Fraction, max: Fraction) -> Result<()> {
         unsafe {
             check(bindings::funnel_stream_set_rate(
@@ -351,7 +417,7 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EINPROGRESS` - The stream is not yet initialized
+    /// * [`Error::InProgress`] - The stream is not yet initialized
     pub fn get_rate(&self) -> Result<Fraction> {
         let mut fraction = funnel_fraction { num: 0, den: 0 };
         unsafe {
@@ -378,8 +444,8 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - The stream is in an invalid state (missing settings)
-    /// * `-EIO` - The PipeWire context is invalid or stream creation failed
+    /// * [`Error::InvalidArgument`] - The stream is in an invalid state (missing settings)
+    /// * [`Error::Io`] - The PipeWire context is invalid or stream creation failed
     pub fn configure(&mut self) -> Result<()> {
         unsafe { check(bindings::funnel_stream_configure(self.stream)) }
     }
@@ -388,8 +454,8 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - The stream is in an invalid state (not configured)
-    /// * `-EIO` - The PipeWire context is invalid or stream creation failed
+    /// * [`Error::InvalidArgument`] - The stream is in an invalid state (not configured)
+    /// * [`Error::Io`] - The PipeWire context is invalid or stream creation failed
     pub fn start(&self) -> Result<()> {
         unsafe { check(bindings::funnel_stream_start(self.stream)) }
     }
@@ -400,8 +466,8 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - The stream is not started
-    /// * `-EIO` - The PipeWire context is invalid
+    /// * [`Error::InvalidArgument`] - The stream is not started
+    /// * [`Error::Io`] - The PipeWire context is invalid
     pub fn stop(&self) -> Result<()> {
         unsafe { check(bindings::funnel_stream_stop(self.stream)) }
     }
@@ -425,10 +491,10 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - Stream is in an invalid state
-    /// * `-EBUSY` - Attempted to dequeue more than one buffer at once
-    /// * `-EIO` - The PipeWire context is invalid
-    /// * `-ESHUTDOWN` - Stream is not started
+    /// * [`Error::InvalidArgument`] - Stream is in an invalid state
+    /// * [`Error::Busy`] - Attempted to dequeue more than one buffer at once
+    /// * [`Error::Io`] - The PipeWire context is invalid
+    /// * [`Error::Shutdown`] - Stream is not started
     pub fn dequeue(&self) -> Result<Option<FunnelBuffer<'_>>> {
         let mut buffer = std::ptr::null_mut();
         let ret = unsafe { bindings::funnel_stream_dequeue(self.stream, &mut buffer) };
@@ -438,7 +504,7 @@ impl FunnelStream {
                 buffer,
                 _marker: PhantomData,
             })),
-            code => Err(Error { code }),
+            code => Err(check(code).unwrap_err()),
         }
     }
 
@@ -454,9 +520,9 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - Invalid argument, stream is in an invalid state (not yet configured), or buffer requires sync but sync was not handled properly
-    /// * `-EIO` - The PipeWire context is invalid
-    /// * `-ESHUTDOWN` - Stream is not started
+    /// * [`Error::InvalidArgument`] - Invalid argument, stream is in an invalid state (not yet configured), or buffer requires sync but sync was not handled properly
+    /// * [`Error::Io`] - The PipeWire context is invalid
+    /// * [`Error::Shutdown`] - Stream is not started
     ///
     /// # Safety
     /// - todo
@@ -466,7 +532,7 @@ impl FunnelStream {
         match ret {
             0 => Ok(false),
             1 => Ok(true),
-            code => Err(Error { code }),
+            code => Err(check(code).unwrap_err()),
         }
     }
 
@@ -478,7 +544,7 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - Stream is in an invalid state (not yet configured)
+    /// * [`Error::InvalidArgument`] - Stream is in an invalid state (not yet configured)
     pub fn skip_frame(&self) -> Result<()> {
         unsafe { check(bindings::funnel_stream_skip_frame(self.stream)) }
     }
@@ -487,9 +553,9 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EEXIST` - The API was already initialized once
-    /// * `-ENOTSUP` - Missing Vulkan extensions
-    /// * `-ENODEV` - Could not locate DRM render node, or GBM or Vulkan initialization failed
+    /// * [`Error::Exists`] - The API was already initialized once
+    /// * [`Error::NotSupported`] - Missing Vulkan extensions
+    /// * [`Error::NoDevice`] - Could not locate DRM render node, or GBM or Vulkan initialization failed
     ///
     /// # Safety
     /// - todo
@@ -518,7 +584,7 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - Invalid argument or API is not Vulkan
+    /// * [`Error::InvalidArgument`] - Invalid argument or API is not Vulkan
     pub fn vk_set_usage(&mut self, usage: VkImageUsageFlagBits) -> Result<()> {
         unsafe { check(bindings::funnel_stream_vk_set_usage(self.stream, usage)) }
     }
@@ -544,9 +610,9 @@ impl FunnelStream {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - Invalid argument or API is not Vulkan
-    /// * `-ENOTSUP` - VkFormat is not supported by libfunnel
-    /// * `-ENOENT` - VkFormat is not supported by the device or not usable
+    /// * [`Error::InvalidArgument`] - Invalid argument or API is not Vulkan
+    /// * [`Error::NotSupported`] - VkFormat is not supported by libfunnel
+    /// * [`Error::NotFound`] - VkFormat is not supported by the device or not usable
     pub fn vk_add_format(
         &mut self,
         format: VkFormat,
@@ -564,6 +630,7 @@ impl FunnelStream {
     }
 }
 
+/// A buffer for rendering frames, dequeued from a stream.
 pub struct FunnelBuffer<'stream> {
     buffer: *mut bindings::funnel_buffer,
     _marker: PhantomData<&'stream FunnelStream>,
@@ -617,7 +684,7 @@ impl<'stream> FunnelBuffer<'stream> {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - Invalid argument or API is not Vulkan
+    /// * [`Error::InvalidArgument`] - Invalid argument or API is not Vulkan
     ///
     /// # Safety
     /// -  todo
@@ -638,8 +705,8 @@ impl<'stream> FunnelBuffer<'stream> {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - Invalid argument or API is not Vulkan
-    /// * `-EIO` - Format is unsupported (internal error)
+    /// * [`Error::InvalidArgument`] - Invalid argument or API is not Vulkan
+    /// * [`Error::Io`] - Format is unsupported (internal error)
     pub fn vk_get_format(&mut self) -> Result<(VkFormat, bool)> {
         let mut format = VkFormat::default();
         let mut has_alpha = false;
@@ -663,9 +730,9 @@ impl<'stream> FunnelBuffer<'stream> {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - Invalid argument or API is not Vulkan
-    /// * `-EBUSY` - Already called once for this buffer
-    /// * `-EIO` - Failed to import acquire semaphore into Vulkan
+    /// * [`Error::InvalidArgument`] - Invalid argument or API is not Vulkan
+    /// * [`Error::Busy`] - Already called once for this buffer
+    /// * [`Error::Io`] - Failed to import acquire semaphore into Vulkan
     ///
     /// # Safety
     /// - todo
@@ -691,8 +758,8 @@ impl<'stream> FunnelBuffer<'stream> {
     ///
     /// # Errors
     ///
-    /// * `-EINVAL` - Invalid argument or API is not Vulkan
-    /// * `-EBUSY` - Already called once for this buffer
+    /// * [`Error::InvalidArgument`] - Invalid argument or API is not Vulkan
+    /// * [`Error::Busy`] - Already called once for this buffer
     ///
     /// # Safety
     /// - todo
