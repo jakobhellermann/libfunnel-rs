@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result, ensure};
 use ash::ext::debug_utils;
 use ash::khr::{surface, swapchain, wayland_surface};
 use ash::vk::{self, Handle, PresentModeKHR};
-use libfunnel::{FunnelBuffer, FunnelContext, FunnelStream, funnel_fraction, funnel_mode};
+use libfunnel::{Fraction, FunnelBuffer, FunnelContext, FunnelMode, FunnelStream};
 use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
@@ -601,7 +601,7 @@ unsafe fn load_shader_module(device: &ash::Device, code: &[u8]) -> Result<vk::Sh
 }
 
 struct Config {
-    funnel_mode: funnel_mode,
+    funnel_mode: FunnelMode,
     present_mode: PresentModeKHR,
     iterations: u32,
     width: u32,
@@ -613,7 +613,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     let mut config = Config {
-        funnel_mode: funnel_mode::FUNNEL_ASYNC,
+        funnel_mode: FunnelMode::Async,
         present_mode: vk::PresentModeKHR::FIFO,
         iterations: 1,
         width: 512u32,
@@ -623,19 +623,19 @@ fn main() -> Result<()> {
     for arg in &args[1..] {
         match arg.as_str() {
             "-async" => {
-                config.funnel_mode = funnel_mode::FUNNEL_ASYNC;
+                config.funnel_mode = FunnelMode::Async;
                 config.present_mode = vk::PresentModeKHR::FIFO;
             }
             "-single" => {
-                config.funnel_mode = funnel_mode::FUNNEL_SINGLE_BUFFERED;
+                config.funnel_mode = FunnelMode::SingleBuffered;
                 config.present_mode = vk::PresentModeKHR::MAILBOX;
             }
             "-double" => {
-                config.funnel_mode = funnel_mode::FUNNEL_DOUBLE_BUFFERED;
+                config.funnel_mode = FunnelMode::DoubleBuffered;
                 config.present_mode = vk::PresentModeKHR::MAILBOX;
             }
             "-synchronous" => {
-                config.funnel_mode = funnel_mode::FUNNEL_SYNCHRONOUS;
+                config.funnel_mode = FunnelMode::Synchronous;
                 config.present_mode = vk::PresentModeKHR::MAILBOX;
             }
             "-sync_torture" => {
@@ -1409,7 +1409,7 @@ fn setup_funnel(
 
         stream.set_size(config.width, config.height)?;
         stream.set_mode(config.funnel_mode)?;
-        stream.set_rate(funnel_fraction::VARIABLE, 1.into(), 1000.into())?;
+        stream.set_rate(Fraction::VARIABLE, 1.into(), 1000.into())?;
         stream.vk_set_usage(vk::ImageUsageFlags::TRANSFER_DST.as_raw())?;
 
         let mut have_format = false;

@@ -28,8 +28,8 @@
 //!
 //! // Configure stream
 //! stream.set_size(1920, 1080)?;
-//! stream.set_mode(funnel_mode::FUNNEL_ASYNC)?;
-//! stream.set_rate(funnel_fraction::VARIABLE, 1.into(), 144.into())?;
+//! stream.set_mode(FunnelMode::Async)?;
+//! stream.set_rate(Fraction::VARIABLE, 1.into(), 144.into())?;
 //! stream.configure()?;
 //! stream.start()?;
 //!
@@ -71,19 +71,139 @@
 //! - Stream data processing (dequeing/enqueuing buffers) may happen in a different thread (or multiple threads, in principle)
 //! - Stream status (start/stop/skip frame) may also be managed by arbitrary threads
 //!
-//! Internally, libfunnel uses a single PipeWire thread loop per funnel_ctx, and synchronization happens using a context-global lock. Therefore, if your application has multiple completely independent streams that have no relation to each other and are managed by different threads, it may be more efficient to create a whole new funnel_ctx for each thread, and therefore have independent PipeWire daemon connections and thread loops. This is particularly relevant if you are using FUNNEL_SYNCHRONOUS mode, since in that mode the PipeWire processing thread is completely blocked while any stream has a buffer dequeued.
+//! Internally, libfunnel uses a single PipeWire thread loop per [`FunnelContext`], and synchronization happens using a context-global lock. Therefore, if your application has multiple completely independent streams that have no relation to each other and are managed by different threads, it may be more efficient to create a whole new [`FunnelContext`] for each thread, and therefore have independent PipeWire daemon connections and thread loops. This is particularly relevant if you are using [`FunnelMode::Synchronous`] mode, since in that mode the PipeWire processing thread is completely blocked while any stream has a buffer dequeued.
 
 use std::{ffi::CStr, marker::PhantomData};
 
 use crate::bindings::{
     VkDevice, VkFence, VkFormat, VkFormatFeatureFlagBits, VkImage, VkImageUsageFlagBits,
-    VkInstance, VkPhysicalDevice, VkSemaphore, funnel_sync,
+    VkInstance, VkPhysicalDevice, VkSemaphore,
 };
 
 #[allow(nonstandard_style, dead_code)]
 mod bindings;
 
-pub use bindings::{funnel_fraction, funnel_mode};
+use bindings::funnel_fraction;
+
+/// Synchronization modes for the frame pacing
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum FunnelMode {
+    /// Produce frames asynchronously to the consumer.
+    ///
+    /// In this mode, libfunnel calls never block and you
+    /// must be able to handle the lack of a buffer (by
+    /// skipping rendering/copying to it). This mode only
+    /// makes sense if your application is FPS-limited by
+    /// some other consumer (for example, if it renders to
+    /// the screen, usually with VSync). You should configure
+    /// the frame rate you expect to produce frames at with
+    /// [`FunnelStream::set_rate`].
+    ///
+    /// This mode essentially behaves like triple buffering.
+    /// Whenever the PipeWire cycle runs, the consumer will
+    /// receive the frame that was most recently submitted
+    /// to [`FunnelStream::enqueue`].
+    Async,
+    /// Produce frames synchronously to the consumer with
+    /// double buffering.
+    ///
+    /// In this mode, after a frame is produced, it is
+    /// queued to be sent out to the consumer in the next
+    /// PipeWire process cycle, and you may immediately
+    /// dequeue a new buffer to start rendering the next
+    /// frame. libfunnel will block at [`FunnelStream::enqueue`]
+    /// until the previously queued frame has been consumed.
+    /// In this mode, [`FunnelStream::dequeue`] will only
+    /// block if there are no free buffers (if the consumer is
+    /// not freeing buffers quickly enough).
+    ///
+    /// This mode effectively adds two frames of latency,
+    /// as up to two frames can be rendered ahead of the
+    /// PipeWire cycle (one ready to be submitted, and
+    /// one blocked at [`FunnelStream::enqueue`]).
+    DoubleBuffered,
+    /// Produce frames synchronously to the consumer with
+    /// single buffering.
+    ///
+    /// In this mode, after a frame is produced, it is
+    /// queued to be sent out to the consumer in the next
+    /// PipeWire process cycle. When you are ready to begin
+    /// rendering a new frame, libfunnel will block
+    /// at [`FunnelStream::dequeue`] until the previous frame
+    /// has been sent to the consumer. In this mode,
+    /// [`FunnelStream::enqueue`] will never block.
+    ///
+    /// This mode effectively adds one frame of latency,
+    /// as only one frame can be rendered ahead of the
+    /// PipeWire cycle.
+    SingleBuffered,
+    /// Produce frames synchronously with the PipeWire process
+    /// cycle.
+    ///
+    /// In this mode, [`FunnelStream::dequeue`] will wait for
+    /// the beginning of a PipeWire process cycle, and the
+    /// process cycle will be blocked until the frame is
+    /// submitted with [`FunnelStream::enqueue`].
+    ///
+    /// This mode provides the lowest possible latency, but
+    /// is only suitable for applications that do not do much
+    /// work to render frames (for example, just a copy), as
+    /// the PipeWire graph will be blocked while the buffer
+    /// is dequeued. It adds no latency.
+    Synchronous,
+}
+
+impl From<FunnelMode> for bindings::funnel_mode {
+    fn from(mode: FunnelMode) -> Self {
+        match mode {
+            FunnelMode::Async => bindings::funnel_mode::FUNNEL_ASYNC,
+            FunnelMode::DoubleBuffered => bindings::funnel_mode::FUNNEL_DOUBLE_BUFFERED,
+            FunnelMode::SingleBuffered => bindings::funnel_mode::FUNNEL_SINGLE_BUFFERED,
+            FunnelMode::Synchronous => bindings::funnel_mode::FUNNEL_SYNCHRONOUS,
+        }
+    }
+}
+
+/// Buffer synchronization mode for frames
+///
+/// See [buffersync](https://libfunnel.readthedocs.io/en/latest/buffersync.html) for more information on sync modes.
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum FunnelSync {
+    /// Use implicit sync only.
+    Implicit,
+    /// Use explicit sync only.
+    Explicit,
+    /// Support both implicit and explicit sync.
+    Both,
+}
+
+impl From<FunnelSync> for bindings::funnel_sync {
+    fn from(sync: FunnelSync) -> Self {
+        match sync {
+            FunnelSync::Implicit => bindings::funnel_sync::FUNNEL_SYNC_IMPLICIT,
+            FunnelSync::Explicit => bindings::funnel_sync::FUNNEL_SYNC_EXPLICIT,
+            FunnelSync::Both => bindings::funnel_sync::FUNNEL_SYNC_BOTH,
+        }
+    }
+}
+
+impl From<bindings::funnel_sync> for FunnelSync {
+    fn from(sync: bindings::funnel_sync) -> Self {
+        match sync {
+            bindings::funnel_sync::FUNNEL_SYNC_IMPLICIT => FunnelSync::Implicit,
+            bindings::funnel_sync::FUNNEL_SYNC_EXPLICIT => FunnelSync::Explicit,
+            bindings::funnel_sync::FUNNEL_SYNC_BOTH => FunnelSync::Both,
+        }
+    }
+}
+
+/// A rational frame rate
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Fraction {
+    pub num: u32,
+    pub den: u32,
+}
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -180,8 +300,8 @@ impl FunnelStream {
     /// # Errors
     ///
     /// * `-EINVAL` - Invalid argument
-    pub fn set_mode(&mut self, mode: funnel_mode) -> Result<()> {
-        unsafe { check(bindings::funnel_stream_set_mode(self.stream, mode)) }
+    pub fn set_mode(&mut self, mode: FunnelMode) -> Result<()> {
+        unsafe { check(bindings::funnel_stream_set_mode(self.stream, mode.into())) }
     }
 
     /// Configure the synchronization modes for the stream.
@@ -192,12 +312,12 @@ impl FunnelStream {
     ///
     /// * `-EINVAL` - The selected sync combination is invalid for this API
     /// * `-EOPNOTSUPP` - The API/driver does not support this sync mode
-    pub fn set_sync(&mut self, frontend: funnel_sync, backend: funnel_sync) -> Result<()> {
+    pub fn set_sync(&mut self, frontend: FunnelSync, backend: FunnelSync) -> Result<()> {
         unsafe {
             check(bindings::funnel_stream_set_sync(
                 self.stream,
-                frontend,
-                backend,
+                frontend.into(),
+                backend.into(),
             ))
         }
     }
@@ -206,25 +326,20 @@ impl FunnelStream {
     ///
     /// # Arguments
     ///
-    /// * `default` - Default frame rate ([`funnel_fraction::VARIABLE`] for no default or variable)
-    /// * `min` - Minimum frame rate ([`funnel_fraction::VARIABLE`] if variable)
-    /// * `max` - Maximum frame rate ([`funnel_fraction::VARIABLE`] if variable)
+    /// * `default` - Default frame rate ([`Fraction::VARIABLE`] for no default or variable)
+    /// * `min` - Minimum frame rate ([`Fraction::VARIABLE`] if variable)
+    /// * `max` - Maximum frame rate ([`Fraction::VARIABLE`] if variable)
     ///
     /// # Errors
     ///
     /// * `-EINVAL` - Invalid argument
-    pub fn set_rate(
-        &mut self,
-        default: funnel_fraction,
-        min: funnel_fraction,
-        max: funnel_fraction,
-    ) -> Result<()> {
+    pub fn set_rate(&mut self, default: Fraction, min: Fraction, max: Fraction) -> Result<()> {
         unsafe {
             check(bindings::funnel_stream_set_rate(
                 self.stream,
-                default,
-                min,
-                max,
+                default.into(),
+                min.into(),
+                max.into(),
             ))
         }
     }
@@ -234,15 +349,18 @@ impl FunnelStream {
     /// # Errors
     ///
     /// * `-EINPROGRESS` - The stream is not yet initialized
-    pub fn get_rate(&self) -> Result<funnel_fraction> {
-        let mut fraction = funnel_fraction::ZERO;
+    pub fn get_rate(&self) -> Result<Fraction> {
+        let mut fraction = funnel_fraction { num: 0, den: 0 };
         unsafe {
             check(bindings::funnel_stream_get_rate(
                 self.stream,
                 &raw mut fraction,
             ))?;
         }
-        Ok(fraction)
+        Ok(Fraction {
+            num: fraction.num,
+            den: fraction.den,
+        })
     }
 
     /// Clear the supported format list. Used for reconfiguration.
@@ -275,7 +393,7 @@ impl FunnelStream {
 
     /// Stop running a stream.
     ///
-    /// If another thread is blocked on `dequeue()`, this will unblock it.
+    /// If another thread is blocked on [`FunnelStream::dequeue`], this will unblock it.
     ///
     /// # Errors
     ///
@@ -351,7 +469,7 @@ impl FunnelStream {
 
     /// Skip a frame for a stream.
     ///
-    /// This call forces at least one subsequent call to `dequeue()`
+    /// This call forces at least one subsequent call to [`FunnelStream::dequeue`]
     /// to return without a buffer. This is useful to break a thread out of
     /// that function.
     ///
@@ -391,7 +509,7 @@ impl FunnelStream {
     /// Set the required buffer usage. This will control the usage for
     /// images allocated by libfunnel.
     ///
-    /// [`vk_add_format`](FunnelStream::vk_add_format) will fail if the requested usages
+    /// [`FunnelStream::vk_add_format`] will fail if the requested usages
     /// are not available. In this case, you may reconfigure the usage
     /// and try again.
     ///
@@ -411,7 +529,7 @@ impl FunnelStream {
     /// - `VK_FORMAT_B8G8R8A8_UNORM`
     ///
     /// The corresponding UNORM variants are also acceptable, and equivalent.
-    /// `vk_get_format()` will always return the SRGB formats. If
+    /// [`FunnelBuffer::vk_get_format`] will always return the SRGB formats. If
     /// you need UNORM (because you are doing sRGB/gamma conversion in your shader),
     /// you can use UNORM constants when you create a VkImageView.
     ///
@@ -460,7 +578,7 @@ impl<'stream> FunnelBuffer<'stream> {
     /// Set an arbitrary user data pointer for a buffer.
     ///
     /// The user is responsible for managing the lifetime of this object.
-    /// Generally, you should use `set_buffer_callbacks()`
+    /// Generally, you should use [`FunnelStream::set_buffer_callbacks`]
     /// to provide buffer creation/destruction callbacks, and set and
     /// release the user data pointer in the alloc and free callback
     /// respectively.
@@ -587,15 +705,28 @@ impl<'stream> FunnelBuffer<'stream> {
     }
 }
 
-impl funnel_fraction {
-    pub const VARIABLE: funnel_fraction = funnel_fraction { num: 0, den: 1 };
+impl Fraction {
+    /// Indicates that the frame rate is variable
+    pub const VARIABLE: Fraction = Fraction { num: 0, den: 1 };
 
-    const ZERO: funnel_fraction = funnel_fraction { num: 0, den: 0 };
+    /// Create a new fraction
+    pub const fn new(num: u32, den: u32) -> Self {
+        Fraction { num, den }
+    }
 }
 
-impl From<u32> for funnel_fraction {
+impl From<u32> for Fraction {
     fn from(value: u32) -> Self {
-        funnel_fraction { num: value, den: 1 }
+        Fraction { num: value, den: 1 }
+    }
+}
+
+impl From<Fraction> for funnel_fraction {
+    fn from(f: Fraction) -> Self {
+        funnel_fraction {
+            num: f.num,
+            den: f.den,
+        }
     }
 }
 
