@@ -7,3 +7,10 @@ links = "libfunnel"
 [dependencies]
 
 [build-dependencies]
+
+[dev-dependencies]
+anyhow = "1.0"
+ash = { version = "0.38", default-features = false, features = ["libloading", "loaded", "std"] }
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
