@@ -1264,23 +1264,21 @@ fn render_loop(
         // Get funnel semaphores and fence if we have a buffer (C lines 1074-1080)
         let (wait_semaphores, signal_semaphores, submit_fence) =
             if let Some(buf) = &mut funnel_buffer {
-                unsafe {
-                    let (funnel_wait_sema, funnel_signal_sema) =
-                        buf.vk_get_semaphores().context("get vk fence")?;
-                    let funnel_fence = buf.vk_get_fence()?;
+                let (funnel_wait_sema, funnel_signal_sema) =
+                    buf.vk_get_semaphores().context("get vk fence")?;
+                let funnel_fence = buf.vk_get_fence()?;
 
-                    (
-                        vec![
-                            current_start_semaphore,
-                            vk::Semaphore::from_raw(funnel_wait_sema as u64),
-                        ],
-                        vec![
-                            current_end_semaphore,
-                            vk::Semaphore::from_raw(funnel_signal_sema as u64),
-                        ],
-                        vk::Fence::from_raw(funnel_fence as u64),
-                    )
-                }
+                (
+                    vec![
+                        current_start_semaphore,
+                        vk::Semaphore::from_raw(funnel_wait_sema as u64),
+                    ],
+                    vec![
+                        current_end_semaphore,
+                        vk::Semaphore::from_raw(funnel_signal_sema as u64),
+                    ],
+                    vk::Fence::from_raw(funnel_fence as u64),
+                )
             } else {
                 (
                     vec![current_start_semaphore],
@@ -1307,7 +1305,7 @@ fn render_loop(
 
         // Enqueue funnel buffer if we have one (C lines 1094-1102)
         if let Some(buf) = funnel_buffer.take() {
-            let was_enqueued = unsafe { stream.enqueue(buf).context("enqueue")? };
+            let was_enqueued = stream.enqueue(buf).context("enqueue")?;
             if !was_enqueued {
                 eprintln!("Buffer dropped (stream renegotiated or paused)");
             }

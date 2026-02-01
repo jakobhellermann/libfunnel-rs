@@ -523,11 +523,8 @@ impl FunnelStream {
     /// * [`Error::InvalidArgument`] - Invalid argument, stream is in an invalid state (not yet configured), or buffer requires sync but sync was not handled properly
     /// * [`Error::Io`] - The PipeWire context is invalid
     /// * [`Error::Shutdown`] - Stream is not started
-    ///
-    /// # Safety
-    /// - todo
-    // TODO: does buf need to be borrowed from this stream?
-    pub unsafe fn enqueue(&self, buffer: FunnelBuffer<'_>) -> Result<bool> {
+    pub fn enqueue(&self, buffer: FunnelBuffer<'_>) -> Result<bool> {
+        // SAFETY: funnel_stream_enqueue asserts that the buffer comes from this stream
         let ret = unsafe { bindings::funnel_stream_enqueue(self.stream, buffer.buffer) };
         match ret {
             0 => Ok(false),
@@ -558,7 +555,8 @@ impl FunnelStream {
     /// * [`Error::NoDevice`] - Could not locate DRM render node, or GBM or Vulkan initialization failed
     ///
     /// # Safety
-    /// - todo
+    /// - `instance`, `physical_device` and `device` must point to valid corrseponding vulkan types
+    /// - the parameters must be live for as long as this stream exists
     pub unsafe fn init_vulkan(
         &mut self,
         instance: VkInstance,
@@ -652,10 +650,7 @@ impl<'stream> FunnelBuffer<'stream> {
     /// to provide buffer creation/destruction callbacks, and set and
     /// release the user data pointer in the alloc and free callback
     /// respectively.
-    ///
-    /// # Safety
-    /// - todo
-    pub unsafe fn set_user_data(&mut self, data: *mut ()) {
+    pub fn set_user_data(&mut self, data: *mut ()) {
         unsafe { bindings::funnel_buffer_set_user_data(self.buffer, data.cast()) };
     }
 
@@ -685,9 +680,6 @@ impl<'stream> FunnelBuffer<'stream> {
     /// # Errors
     ///
     /// * [`Error::InvalidArgument`] - Invalid argument or API is not Vulkan
-    ///
-    /// # Safety
-    /// -  todo
     pub fn vk_get_image(&mut self) -> Result<VkImage> {
         let mut image = std::ptr::null_mut();
         unsafe {
@@ -733,10 +725,7 @@ impl<'stream> FunnelBuffer<'stream> {
     /// * [`Error::InvalidArgument`] - Invalid argument or API is not Vulkan
     /// * [`Error::Busy`] - Already called once for this buffer
     /// * [`Error::Io`] - Failed to import acquire semaphore into Vulkan
-    ///
-    /// # Safety
-    /// - todo
-    pub unsafe fn vk_get_semaphores(&mut self) -> Result<(VkSemaphore, VkSemaphore)> {
+    pub fn vk_get_semaphores(&mut self) -> Result<(VkSemaphore, VkSemaphore)> {
         let mut acquire = std::ptr::null_mut();
         let mut release = std::ptr::null_mut();
         unsafe {
@@ -760,10 +749,7 @@ impl<'stream> FunnelBuffer<'stream> {
     ///
     /// * [`Error::InvalidArgument`] - Invalid argument or API is not Vulkan
     /// * [`Error::Busy`] - Already called once for this buffer
-    ///
-    /// # Safety
-    /// - todo
-    pub unsafe fn vk_get_fence(&mut self) -> Result<VkFence> {
+    pub fn vk_get_fence(&mut self) -> Result<VkFence> {
         let mut fence = std::ptr::null_mut();
         unsafe {
             check(bindings::funnel_buffer_get_vk_fence(
