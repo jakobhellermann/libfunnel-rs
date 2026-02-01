@@ -3,6 +3,9 @@ name = "libfunnel"
 version = "0.1.0"
 edition = "2024"
 links = "libfunnel"
+license = "MIT"
+repository = "https://github.com/jakobhellermann/libfunnel-rs"
+description = "Easy app-to-app frame sharing using PipeWire"
 
 [dependencies]
 
