@@ -205,8 +205,10 @@ pub struct Fraction {
     pub den: u32,
 }
 
+/// A specialized Result type for libfunnel operations.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// An error returned by libfunnel operations.
 #[derive(Debug)]
 pub struct Error {
     pub code: i32,
@@ -226,6 +228,7 @@ fn check(code: i32) -> Result<(), Error> {
     }
 }
 
+/// A Funnel context for creating video streams.
 pub struct FunnelContext {
     ctx: *mut bindings::funnel_ctx,
 }
@@ -730,6 +733,7 @@ impl From<Fraction> for funnel_fraction {
     }
 }
 
+/// A trait for handling buffer allocation and deallocation callbacks.
 pub trait BufferCallbacks {
     type UserData: Send + Sync + 'static; // TODO: can this be relaxed?
 
